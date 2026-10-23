@@ -101,6 +101,65 @@ def _compute_radial_velocities(occ):
     return rad_vels
 
 
+def _extract_astrometric_results(occ, occ_full_text):
+    """
+    Extrai os dados da posição astrométrica refinada e offsets da efeméride
+    gerados por `occ.new_astrometric_position()`.
+    """
+    astrom_text = ""
+    if hasattr(occ, 'fitted_params') and occ.fitted_params:
+        try:
+            astrom_text = occ.new_astrometric_position(verbose=False)
+        except Exception:
+            astrom_text = occ_full_text
+    else:
+        astrom_text = occ_full_text
+
+    res = {}
+
+    # Ephemeris offset (km): X = 42.3 km +/- 8.6 km; Y = -22.0 km +/- 10.6 km
+    m_km = re.search(
+        r'Ephemeris offset \(km\):\s*X\s*=\s*([-\d\.]+)(?:\s*km)?\s*\+/-\s*([-\d\.]+)(?:\s*km)?;\s*Y\s*=\s*([-\d\.]+)(?:\s*km)?\s*\+/-\s*([-\d\.]+)',
+        astrom_text
+    )
+    if m_km:
+        res['x_km'] = f"${float(m_km.group(1)):.1f} \\pm {float(m_km.group(2)):.1f}$ km"
+        res['y_km'] = f"${float(m_km.group(3)):.1f} \\pm {float(m_km.group(4)):.1f}$ km"
+
+    # Ephemeris offset (mas): da_cos_dec = 11.903 +/- 2.407; d_dec = -6.189 +/- 2.996
+    m_mas = re.search(
+        r'Ephemeris offset \(mas\):\s*da_cos_dec\s*=\s*([-\d\.]+)\s*\+/-\s*([-\d\.]+);\s*d_dec\s*=\s*([-\d\.]+)\s*\+/-\s*([-\d\.]+)',
+        astrom_text
+    )
+    if m_mas:
+        res['da_cos_dec'] = f"${float(m_mas.group(1)):.3f} \\pm {float(m_mas.group(2)):.3f}$ mas"
+        res['d_dec'] = f"${float(m_mas.group(3)):.3f} \\pm {float(m_mas.group(4)):.3f}$ mas"
+
+    # Astrometric object position at time 2026-05-14 03:34:26.120 for reference 'geocenter'
+    m_epoch = re.search(
+        r'Astrometric object position at time\s+([\d\-\s\.:]+)\s+for reference\s+[\'"]?([^\'"\n]+)[\'"]?',
+        astrom_text
+    )
+    if m_epoch:
+        res['epoch'] = f"{m_epoch.group(1).strip()} UTC"
+        res['reference'] = m_epoch.group(2).strip()
+
+    # RA = 11 16 05.6294515 +/- 2.412 mas; DEC = -6 23 13.033410 +/- 3.001 mas
+    m_pos = re.search(
+        r'RA\s*=\s*([\d\s\.]+)\s*\+/-\s*([\d\.]+)\s*mas;\s*DEC\s*=\s*([-\+\d\s\.]+)\s*\+/-\s*([\d\.]+)\s*mas',
+        astrom_text
+    )
+    if m_pos:
+        res['ra'] = m_pos.group(1).strip()
+        res['ra_err'] = f"$\\pm {float(m_pos.group(2)):.3f}$ mas"
+        res['dec'] = m_pos.group(3).strip()
+        res['dec_err'] = f"$\\pm {float(m_pos.group(4)):.3f}$ mas"
+        res['ra_full'] = f"{res['ra']} ({float(m_pos.group(2)):.3f} mas)"
+        res['dec_full'] = f"{res['dec']} ({float(m_pos.group(4)):.3f} mas)"
+
+    return res
+
+
 def _auto_resolve_chi2(occ, lc_chi2_dict, caller_ns):
     """
     Resolve automaticamente os objetos ChiSquare de imersão e emersão para cada corda,
@@ -113,7 +172,6 @@ def _auto_resolve_chi2(occ, lc_chi2_dict, caller_ns):
     resolved = {}
     lc_chi2_dict = lc_chi2_dict or {}
 
-    # Mapear cada objeto LightCurve para variáveis no notebook (ex: lc1 -> '1', lc2 -> '2')
     lc_id_to_idx = {}
     lc_id_to_varname = {}
     for var_name, var_val in caller_ns.items():
@@ -127,7 +185,6 @@ def _auto_resolve_chi2(occ, lc_chi2_dict, caller_ns):
         lc_num = lc_id_to_idx.get(id(lc), str(idx_enum))
         lc_varname = lc_id_to_varname.get(id(lc), f"lc{idx_enum}")
 
-        # 1. Verifica se o usuário passou no lc_chi2_dict (por nome, por 'lc1', por 'obs1', ou pelo objeto lc)
         entry = None
         for candidate_key in [name, lc_varname, f"lc{idx_enum}", f"obs{lc_num}", f"c{lc_num}", lc]:
             try:
@@ -137,8 +194,6 @@ def _auto_resolve_chi2(occ, lc_chi2_dict, caller_ns):
             except TypeError:
                 pass
 
-        # 2. Se não passou no dicionário, tenta achar automaticamente no escopo do Notebook
-        #    procurando por obs{N}_chi2_i / obs{N}_chi2_e ou obs{N}_chi2
         if entry is None and caller_ns:
             auto_i = caller_ns.get(f"obs{lc_num}_chi2_i") or caller_ns.get(f"lc{lc_num}_chi2_i")
             auto_e = caller_ns.get(f"obs{lc_num}_chi2_e") or caller_ns.get(f"lc{lc_num}_chi2_e")
@@ -151,7 +206,6 @@ def _auto_resolve_chi2(occ, lc_chi2_dict, caller_ns):
             elif auto_both is not None:
                 entry = auto_both
 
-        # 3. Fallback final para lc.chisquare
         if entry is None:
             entry = getattr(lc, 'chisquare', None)
 
@@ -194,7 +248,6 @@ def generate_sora_latex_report(
     observer_metadata = observer_metadata or {}
     extra_observers = extra_observers or []
 
-    # Captura automática das variáveis do Jupyter Notebook chamador (ex: lc1, obs1_chi2_i, ellipse_chi2)
     caller_ns = {}
     try:
         frame = inspect.currentframe()
@@ -254,6 +307,7 @@ def generate_sora_latex_report(
         5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten'
     }
     n_pos = len(pos_chords)
+    n_neg = len(neg_chords)
     n_tot = len(all_chords)
     n_pos_word = num_words.get(n_pos, str(n_pos))
     n_tot_word = num_words.get(n_tot, str(n_tot))
@@ -350,6 +404,7 @@ def generate_sora_latex_report(
         except Exception as e:
             print(f"[Aviso] Não foi possível gerar {pred_map_file} automaticamente: {e}")
 
+    # 7.1 Curvas Positivas
     lc_section_data = []
     for name, chord in pos_chords:
         lc = chord.lightcurve
@@ -461,7 +516,52 @@ def generate_sora_latex_report(
             'fig_path': fig_lc_path,
         })
 
-    # Figura da Elipse Ajustada + Cordas
+    # 7.2 Curvas Negativas (gera gráfico da curva de luz normalizada + dados da observação)
+    neg_section_data = []
+    for name, chord in neg_chords:
+        lc = chord.lightcurve
+        meta = observer_metadata.get(name, {})
+        site_title = meta.get('site_name', name)
+        obs_title = meta.get('observers', name)
+        subsection_title = f"{site_title} - {obs_title} (Negative)" if site_title != obs_title else f"{site_title} (Negative)"
+
+        fig_neg_path = os.path.join(figures_dir, f"lc_neg_{name.replace(' ', '_')}.png")
+        tref_iso_date = lc.tref.iso.split()[0] if hasattr(lc, 'tref') else tca_iso.split()[0]
+
+        fig_n, ax_n = plt.subplots(figsize=(10, 4.5), dpi=300)
+        plt.sca(ax_n)
+        try:
+            lc.plot_lc(ax=ax_n)
+        except Exception:
+            pass
+        ax_n.set_xlabel(f"Seconds from {tref_iso_date} 00:00:00", fontsize=11)
+        ax_n.set_ylabel("Normalized Flux", fontsize=11)
+        ax_n.tick_params(labelsize=10)
+        ax_n.legend(loc='best', fontsize=10)
+        plt.tight_layout()
+        fig_n.savefig(fig_neg_path, bbox_inches='tight')
+        plt.close(fig_n)
+
+        t_ini = f"{lc.initial_time.iso.split()[1]}" if hasattr(lc, 'initial_time') else "---"
+        t_end = f"{lc.end_time.iso.split()[1]}" if hasattr(lc, 'end_time') else "---"
+        exptime_s = f"{_to_float(getattr(lc, 'exptime', 0.0)):.4f} s"
+        cycle_s = f"{_to_float(getattr(lc, 'cycle', 0.0)):.4f} s"
+        npts_n = f"{len(lc.time)}" if hasattr(lc, 'time') else "---"
+        disp_n = f"{float(np.std(lc.flux)):.3f}" if hasattr(lc, 'flux') and len(lc.flux) > 0 else "---"
+
+        neg_section_data.append({
+            'name': name,
+            'subsection_title': subsection_title,
+            't_ini': t_ini,
+            't_end': t_end,
+            'exptime': exptime_s,
+            'cycle': cycle_s,
+            'npts': npts_n,
+            'dispersion': disp_n,
+            'fig_path': fig_neg_path,
+        })
+
+    # 7.3 Figura da Elipse Ajustada + Cordas (Positivas e Negativas)
     fig_ellipse_path = os.path.join(figures_dir, "fitted_ellipse.png")
     default_colors = ['blue', 'orange', 'salmon', 'cyan', 'green', 'purple', 'brown']
     chord_colors = chord_colors or {}
@@ -475,7 +575,7 @@ def generate_sora_latex_report(
             chord.plot_chord(segment='positive', color=c_color, lw=2, linestyle='-', label=name, zorder=4)
             chord.plot_chord(segment='error', color='red', lw=3, linestyle='-', zorder=3)
         else:
-            chord.plot_chord(segment='negative', color=c_color, lw=2, linestyle='--', label=f"{name} (neg.)", zorder=2)
+            chord.plot_chord(segment='negative', color=c_color, lw=2, linestyle='--', label=f"{name} (negative)", zorder=2)
 
     if ellipse_chi2 is not None:
         draw_ellipse(**ellipse_chi2.get_values(), color='black', lw=2, zorder=5)
@@ -491,7 +591,7 @@ def generate_sora_latex_report(
         cf = occ.fitted_params['center_f'][0]
         cg = occ.fitted_params['center_g'][0]
         req = occ.fitted_params['equatorial_radius'][0]
-        margin = req * 1.45
+        margin = req * 1.55
         ax_el.set_xlim(cf - margin, cf + margin)
         ax_el.set_ylim(cg - margin, cg + margin)
 
@@ -503,7 +603,7 @@ def generate_sora_latex_report(
     fig_el.savefig(fig_ellipse_path, bbox_inches='tight')
     plt.close(fig_el)
 
-    # Figura dos gráficos de Chi2 dos parâmetros da Elipse
+    # 7.4 Figura dos gráficos de Chi2 dos parâmetros da Elipse
     fig_el_chi2_path = os.path.join(figures_dir, "ellipse_chi2_params.png")
     has_el_chi2_plot = False
     if ellipse_chi2 is not None:
@@ -577,7 +677,7 @@ def generate_sora_latex_report(
             'filter': _latex_escape(meta.get('filter', 'Clear')),
         })
 
-    # 9. Montagem da Tabela 8 (Summary of the instants obtained for the light curves)
+    # 9. Montagem da Tabela de Resumo das Cordas (Positivas + Negativas)
     table8_rows = []
     for name, chord in pos_chords:
         lc = chord.lightcurve
@@ -592,9 +692,17 @@ def generate_sora_latex_report(
 
         imm_str = f"{lc.immersion.iso} ({imm_err:.3f})" if getattr(lc, 'immersion', None) is not None else "---"
         eme_str = f"{lc.emersion.iso} ({eme_err:.3f})" if getattr(lc, 'emersion', None) is not None else "---"
-        table8_rows.append((site_label, imm_str, eme_str))
+        table8_rows.append((site_label, imm_str, eme_str, "Positive"))
 
-    # 10. Montagem da Tabela 9 (Best ellipse from fit with 1-sigma error bar)
+    for name, chord in neg_chords:
+        lc = chord.lightcurve
+        meta = observer_metadata.get(name, {})
+        site_label = _latex_escape(meta.get('site_name', name))
+        t_ini = f"{lc.initial_time.iso} (start)" if hasattr(lc, 'initial_time') else "Not occulted"
+        t_end = f"{lc.end_time.iso} (end)" if hasattr(lc, 'end_time') else "Not occulted"
+        table8_rows.append((site_label, t_ini, t_end, "Negative"))
+
+    # 10. Montagem da Tabela 9 (Best ellipse from fit with 1-sigma error bar + raio equivalente + albedo)
     fp = getattr(occ, 'fitted_params', {})
     def _fmt_fp(key):
         if key in fp:
@@ -608,8 +716,16 @@ def generate_sora_latex_report(
         ("Oblateness", _fmt_fp('oblateness')),
         ("Position Angle [deg]", _fmt_fp('position_angle')),
     ]
+    if 'equatorial_radius' in fp and 'oblateness' in fp:
+        r_pol = fp['equatorial_radius'][0] * (1.0 - fp['oblateness'][0])
+        r_eqv = np.sqrt(fp['equatorial_radius'][0] * r_pol)
+        table9_rows.append(("R$_{polar}$ [km]", f"{r_pol:.3f}"))
+        table9_rows.append(("R$_{equiv}$ [km]", f"{r_eqv:.3f}"))
 
-    # 11. Construção do código LaTeX (.tex) fiel ao PDF modelo
+    # 11. Extração da Posição Astrométrica Refinada (new_astrometric_position)
+    astrom_data = _extract_astrometric_results(occ, occ_full_text)
+
+    # 12. Construção do código LaTeX (.tex)
     prelim_str = r"\\ \textbf{PRELIMINARY}" if preliminary else ""
     tex_lines = []
     tex_lines.append(r"% =============================================================================")
@@ -664,7 +780,6 @@ def generate_sora_latex_report(
         f"was coordinated using the *Occultation Portal* website [4]."
     )
     tex_lines.append(r"")
-    n_neg = len(neg_chords)
     if n_neg > 0:
         neg_word = num_words.get(n_neg, str(n_neg))
         neg_noun = "chord" if n_neg == 1 else "chords"
@@ -727,8 +842,7 @@ def generate_sora_latex_report(
     tex_lines.append(f"        Closest approach & {ca_val:.3f} arcsec \\\\")
     tex_lines.append(f"        Position angle & ${pa_val:.2f}^\\circ$ \\\\")
     tex_lines.append(f"        Positive chords & {n_pos} \\\\")
-    if n_neg > 0:
-        tex_lines.append(f"        Negative chords & {n_neg} \\\\")
+    tex_lines.append(f"        Negative chords & {n_neg} \\\\")
     tex_lines.append(r"        \hline")
     tex_lines.append(r"    \end{tabular}")
     tex_lines.append(r"    \label{tab:circumstances}")
@@ -778,12 +892,17 @@ def generate_sora_latex_report(
     else:
         tex_lines.append(r"")
         obs_noun = "observation was" if n_pos == 1 else "observations were"
+        neg_sentence = (
+            f" Additionally, {n_neg} negative observation(s) provided constraints on the asteroid's limb projection."
+            if n_neg > 0 else ""
+        )
         tex_lines.append(
             f"In total, {n_pos} positive {obs_noun} used for the determination of the instants of immersion "
-            f"and emersion of the main body."
+            f"and emersion of the main body.{neg_sentence}"
         )
     tex_lines.append(r"")
 
+    # 2.X Subseções das Cordas Positivas
     for idx, lc_info in enumerate(lc_section_data):
         tex_lines.append(r"\clearpage")
         tex_lines.append(f"\\subsection{{{_latex_escape(lc_info['subsection_title'])}}}")
@@ -818,32 +937,71 @@ def generate_sora_latex_report(
         tex_lines.append(r"\end{figure}")
         tex_lines.append(r"")
 
+    # 2.Y Subseções das Cordas Negativas (se existirem)
+    for idx, neg_info in enumerate(neg_section_data):
+        tex_lines.append(r"\clearpage")
+        tex_lines.append(f"\\subsection{{{_latex_escape(neg_info['subsection_title'])}}}")
+        tex_lines.append(r"")
+        tex_lines.append(
+            f"No secondary or main body occultation drop was detected in the light curve recorded at "
+            f"{_latex_escape(neg_info['name'])}. The normalized light curve is presented below and its "
+            f"sky-plane trajectory is used as a negative chord constraint."
+        )
+        tex_lines.append(r"")
+        tex_lines.append(r"\begin{table}[H]")
+        tex_lines.append(r"    \centering")
+        tex_lines.append(f"    \\caption{{Summary of the negative light curve for {_latex_escape(neg_info['name'])}.}}")
+        tex_lines.append(r"    \vspace{0.15cm}")
+        tex_lines.append(r"    \small")
+        tex_lines.append(r"    \begin{tabular}{cccccc}")
+        tex_lines.append(r"        \hline\hline")
+        tex_lines.append(r"        Initial Time (UTC) & End Time (UTC) & Exp. Time & Cycle Time & Npts & Dispersion ($\sigma$) \\")
+        tex_lines.append(r"        \hline")
+        tex_lines.append(
+            f"        {neg_info['t_ini']} & {neg_info['t_end']} & {neg_info['exptime']} & "
+            f"{neg_info['cycle']} & {neg_info['npts']} & {neg_info['dispersion']} \\\\"
+        )
+        tex_lines.append(r"        \hline")
+        tex_lines.append(r"    \end{tabular}")
+        tex_lines.append(r"\end{table}")
+        tex_lines.append(r"")
+        tex_lines.append(r"\begin{figure}[H]")
+        tex_lines.append(r"    \centering")
+        tex_lines.append(f"    \\includegraphics[width=0.85\\textwidth]{{{neg_info['fig_path']}}}")
+        tex_lines.append(f"    \\caption{{Normalized light curve recorded at {_latex_escape(neg_info['name'])} (negative chord).}}")
+        tex_lines.append(r"\end{figure}")
+        tex_lines.append(r"")
+
     tex_lines.append(r"\clearpage")
     tex_lines.append(r"")
     tex_lines.append(r"% =============================================================================")
-    tex_lines.append(r"% SEÇÃO 3: AJUSTE DE FORMA (ELIPSE)")
+    tex_lines.append(r"% SEÇÃO 3: AJUSTE DE FORMA (ELIPSE) E POSIÇÃO ASTROMÉTRICA")
     tex_lines.append(r"% =============================================================================")
-    tex_lines.append(r"\section{Fit shape}")
+    tex_lines.append(r"\section{Fit shape and astrometric position}")
     tex_lines.append(r"")
-    tex_lines.append(r"Using the instants of ingress and egress presented in the previous section, the chords are projected in the sky plane, allowing the ellipse fit.")
+    tex_lines.append(
+        r"Using the instants of ingress and egress presented in the previous section, along with the "
+        r"constraints provided by any negative chords, the chords are projected in the sky plane, "
+        r"allowing the ellipse fit and the determination of the refined astrometric position of the body."
+    )
     tex_lines.append(r"")
-    tex_lines.append(r"% --- Tabela de Resumo dos Instantes ---")
+    tex_lines.append(r"% --- Tabela de Resumo dos Instantes e Cordas (Positivas e Negativas) ---")
     tex_lines.append(r"\begin{table}[H]")
     tex_lines.append(r"    \centering")
-    tex_lines.append(r"    \caption{Summary of the instants obtained for the light curves.}")
+    tex_lines.append(r"    \caption{Summary of the chords and instants obtained for the light curves.}")
     tex_lines.append(r"    \vspace{0.2cm}")
-    tex_lines.append(r"    \begin{tabular}{lcc}")
+    tex_lines.append(r"    \begin{tabular}{lccc}")
     tex_lines.append(r"        \hline\hline")
-    tex_lines.append(r"        Site & Immersion & Emersion \\")
+    tex_lines.append(r"        Site & Immersion / Start (UTC) & Emersion / End (UTC) & Status \\")
     tex_lines.append(r"        \hline")
-    for site_label, imm_str, eme_str in table8_rows:
-        tex_lines.append(f"        {site_label} & {imm_str} & {eme_str} \\\\")
+    for site_label, imm_str, eme_str, st_label in table8_rows:
+        tex_lines.append(f"        {site_label} & {imm_str} & {eme_str} & {st_label} \\\\")
     tex_lines.append(r"        \hline")
     tex_lines.append(r"    \end{tabular}")
     tex_lines.append(r"    \label{tab:summary_instants}")
     tex_lines.append(r"\end{table}")
     tex_lines.append(r"")
-    tex_lines.append(r"\vspace{0.4cm}")
+    tex_lines.append(r"\vspace{0.3cm}")
     tex_lines.append(r"")
     tex_lines.append(r"% --- Tabela dos Parâmetros da Elipse Ajustada ---")
     tex_lines.append(r"\begin{table}[H]")
@@ -861,12 +1019,48 @@ def generate_sora_latex_report(
     tex_lines.append(r"    \label{tab:best_ellipse}")
     tex_lines.append(r"\end{table}")
     tex_lines.append(r"")
+
+    # Tabela de Posição Astrométrica Refinada (extraída da análise do SORA)
+    if astrom_data:
+        tex_lines.append(r"\vspace{0.3cm}")
+        tex_lines.append(r"")
+        tex_lines.append(r"% --- Tabela da Posição Astrométrica Refinada pelo SORA ---")
+        tex_lines.append(r"\begin{table}[H]")
+        tex_lines.append(r"    \centering")
+        tex_lines.append(f"    \\caption{{Refined astrometric position of {_latex_escape(body_paren_name)} and ephemeris offset obtained from SORA.}}")
+        tex_lines.append(r"    \vspace{0.2cm}")
+        tex_lines.append(r"    \begin{tabular}{lc}")
+        tex_lines.append(r"        \hline\hline")
+        tex_lines.append(r"        Parameter & Value ($1\sigma$) \\")
+        tex_lines.append(r"        \hline")
+        if 'epoch' in astrom_data:
+            tex_lines.append(f"        Reference Epoch & {astrom_data['epoch']} \\\\")
+        if 'reference' in astrom_data:
+            tex_lines.append(f"        Reference Center & {_latex_escape(astrom_data['reference'])} \\\\")
+        if 'ra' in astrom_data:
+            tex_lines.append(f"        Astrometric RA (ICRS) & {astrom_data['ra']} ({astrom_data['ra_err']}) \\\\")
+        if 'dec' in astrom_data:
+            tex_lines.append(f"        Astrometric DEC (ICRS) & {astrom_data['dec']} ({astrom_data['dec_err']}) \\\\")
+        if 'da_cos_dec' in astrom_data:
+            tex_lines.append(f"        Offset $\\Delta\\alpha\\cos\\delta$ & {astrom_data['da_cos_dec']} \\\\")
+        if 'd_dec' in astrom_data:
+            tex_lines.append(f"        Offset $\\Delta\\delta$ & {astrom_data['d_dec']} \\\\")
+        if 'x_km' in astrom_data:
+            tex_lines.append(f"        Offset $X$ & {astrom_data['x_km']} \\\\")
+        if 'y_km' in astrom_data:
+            tex_lines.append(f"        Offset $Y$ & {astrom_data['y_km']} \\\\")
+        tex_lines.append(r"        \hline")
+        tex_lines.append(r"    \end{tabular}")
+        tex_lines.append(r"    \label{tab:astrometric_position}")
+        tex_lines.append(r"\end{table}")
+        tex_lines.append(r"")
+
     tex_lines.append(r"\clearpage")
     tex_lines.append(r"")
     tex_lines.append(r"\begin{figure}[H]")
     tex_lines.append(r"    \centering")
     tex_lines.append(f"    \\includegraphics[width=0.80\\textwidth]{{{fig_ellipse_path}}}")
-    tex_lines.append(r"    \caption{Best fitted ellipse plotted in black}")
+    tex_lines.append(r"    \caption{Best fitted ellipse plotted in black with positive and negative chords.}")
     tex_lines.append(r"    \label{fig:best_ellipse}")
     tex_lines.append(r"\end{figure}")
     tex_lines.append(r"")
