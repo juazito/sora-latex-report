@@ -237,16 +237,36 @@ def generate_sora_latex_report(
     figures_dir="figures_report",
     chord_colors=None,
     ellipse_sigma_plot=1,
+    lucky_star_url=None,
+    occultation_portal_url=None,
+    portal_url=None,
     star_comment=None,
     campaign_comment=None,
 ):
     """
     Gera automaticamente um relatório completo em LaTeX (.tex) e todas as figuras
     associadas a partir de uma análise de ocultação estelar no SORA.
+
+    Parâmetros principais adicionais
+    --------------------------------
+    lucky_star_url : str, opcional
+        URL da predição/evento no projeto Lucky Star (ex: "https://lesia.obspm.fr/lucky-star/...").
+    occultation_portal_url : str, opcional
+        URL da campanha/evento no Occultation Portal (ex: "https://occultation.tug.tubitak.gov.tr/...").
+    portal_url : str, opcional
+        Atalho genérico para URL do evento (se contiver 'lucky-star' ou 'obspm' associa ao Lucky Star,
+        caso contrário associa ao Occultation Portal).
     """
     os.makedirs(figures_dir, exist_ok=True)
     observer_metadata = observer_metadata or {}
     extra_observers = extra_observers or []
+
+    # Tratamento do atalho portal_url caso o usuário passe um único link
+    if portal_url:
+        if ("lucky-star" in portal_url.lower() or "obspm.fr" in portal_url.lower()) and not lucky_star_url:
+            lucky_star_url = portal_url
+        elif not occultation_portal_url:
+            occultation_portal_url = portal_url
 
     caller_ns = {}
     try:
@@ -341,18 +361,7 @@ def generate_sora_latex_report(
     mag_line1 = "; ".join([f"{b} = {mags[b]:.3f}" for b in line1_bands])
     mag_line2 = "; ".join([f"{b} = {mags[b]:.3f}" for b in line2_bands])
 
-    kerv = star.kervella()
-    star_diam_mas = None
-    if kerv and 'V' in kerv:
-        star_diam_mas = _to_float(kerv['V'])
-    elif kerv:
-        star_diam_mas = _to_float(list(kerv.values())[0])
-
-    if star_diam_mas is not None and not np.isnan(star_diam_mas):
-        star_diam_str = f"{star_diam_mas:.4f} mas (Kervella et al. 2004)"
-    else:
-        star_diam_str = "---"
-
+    # Distância do objeto e diâmetro estelar em mas e km (sempre exibidos juntos!)
     if len(all_chords) > 0 and hasattr(all_chords[0][1].lightcurve, 'd_star'):
         d_star_km = _to_float(all_chords[0][1].lightcurve.d_star, 0.0)
         obj_dist_au = _to_float(all_chords[0][1].lightcurve.dist, 0.0)
@@ -363,6 +372,23 @@ def generate_sora_latex_report(
             d_star_km = float(star.apparent_diameter(distance=obj_dist_au, band='V').to(u.km).value)
         except Exception:
             d_star_km = 0.0
+
+    kerv = star.kervella()
+    star_diam_mas = None
+    if kerv and 'V' in kerv:
+        star_diam_mas = _to_float(kerv['V'])
+    elif kerv:
+        star_diam_mas = _to_float(list(kerv.values())[0])
+
+    # Se d_star_km não veio da lightcurve mas temos star_diam_mas e obj_dist_au, convertemos mas -> km
+    if (d_star_km == 0.0 or np.isnan(d_star_km)) and star_diam_mas is not None and not np.isnan(star_diam_mas):
+        # 1 mas na distância D (AU) equivale a D * 149597870.7 * (pi / (180 * 3600 * 1000)) km
+        d_star_km = float(star_diam_mas * obj_dist_au * u.au.to(u.km) * u.mas.to(u.rad))
+
+    if star_diam_mas is not None and not np.isnan(star_diam_mas):
+        star_diam_str = f"{star_diam_mas:.4f} mas / {d_star_km:.2f} km (Kervella et al. 2004)"
+    else:
+        star_diam_str = "---"
 
     # 4. Parâmetros físicos do Corpo (Tabela 1)
     diam_val = _to_float(getattr(body.diameter, 'value', None))
@@ -446,6 +472,11 @@ def generate_sora_latex_report(
             lam0 = _to_float(getattr(lc, 'lambda_0', 0.700), 0.700)
             dlam = _to_float(getattr(lc, 'delta_lambda', 0.300), 0.300)
             dstar = _to_float(getattr(lc, 'd_star', d_star_km), d_star_km)
+            if star_diam_mas is not None and not np.isnan(star_diam_mas):
+                dstar_both_str = f"{dstar:.2f} km ({star_diam_mas:.4f} mas)"
+            else:
+                dstar_both_str = f"{dstar:.2f} km"
+
             vrad = rad_vels.get(name, {}).get(key)
             if vrad is None:
                 vrad = abs(_to_float(getattr(lc, 'vel', vel_val), vel_val))
@@ -457,7 +488,7 @@ def generate_sora_latex_report(
                 'chi2_pdf': f"{cpdf:.3f}",
                 'dispersion': f"{disp:.3f}",
                 'lambda_str': f"{lam0:.3f} ({dlam:.3f})",
-                'dstar_str': f"{dstar:.2f} km",
+                'dstar_str': dstar_both_str,
                 'vrad_str': f"{vrad:.3f} km/s",
             }
 
@@ -561,7 +592,7 @@ def generate_sora_latex_report(
             'fig_path': fig_neg_path,
         })
 
-    # 7.3 Figura da Elipse Ajustada + Cordas (Positivas e Negativas)
+    # 7.3 Figura da Elipse Ajustada + Cordas + Ponto Central com Barras de Erro (center_f, center_g)
     fig_ellipse_path = os.path.join(figures_dir, "fitted_ellipse.png")
     default_colors = ['blue', 'orange', 'salmon', 'cyan', 'green', 'purple', 'brown']
     chord_colors = chord_colors or {}
@@ -578,18 +609,24 @@ def generate_sora_latex_report(
             chord.plot_chord(segment='negative', color=c_color, lw=2, linestyle='--', label=f"{name} (negative)", zorder=2)
 
     if ellipse_chi2 is not None:
-        draw_ellipse(**ellipse_chi2.get_values(), color='black', lw=2, zorder=5)
+        draw_ellipse(**ellipse_chi2.get_values(), center_dot=True, color='black', lw=2, zorder=5)
         try:
             draw_ellipse(**ellipse_chi2.get_values(sigma=ellipse_sigma_plot), color='grey', alpha=0.5, zorder=1)
         except Exception:
             pass
     elif hasattr(occ, 'fitted_params') and occ.fitted_params:
         params_best = {k: v[0] for k, v in occ.fitted_params.items()}
-        draw_ellipse(**params_best, color='black', lw=2, zorder=5)
+        draw_ellipse(**params_best, center_dot=True, color='black', lw=2, zorder=5)
 
+    # Plota explicitamente o ponto central (center_f, center_g) da elipse ajustada e suas barras de incerteza (1-sigma)
     if hasattr(occ, 'fitted_params') and occ.fitted_params:
-        cf = occ.fitted_params['center_f'][0]
-        cg = occ.fitted_params['center_g'][0]
+        cf, dcf = occ.fitted_params['center_f'][0], occ.fitted_params['center_f'][1]
+        cg, dcg = occ.fitted_params['center_g'][0], occ.fitted_params['center_g'][1]
+        ax_el.errorbar(
+            cf, cg, xerr=dcf, yerr=dcg,
+            fmt='o', color='black', markersize=6, elinewidth=1.5, capsize=3,
+            label=f"Center ({cf:.1f}, {cg:.1f}) km", zorder=6
+        )
         req = occ.fitted_params['equatorial_radius'][0]
         margin = req * 1.55
         ax_el.set_xlim(cf - margin, cf + margin)
@@ -598,7 +635,7 @@ def generate_sora_latex_report(
     ax_el.set_xlabel("f (km)", fontsize=18)
     ax_el.set_ylabel("g (km)", fontsize=18)
     ax_el.tick_params(labelsize=13)
-    ax_el.legend(ncol=2, loc='upper center', fontsize=11)
+    ax_el.legend(ncol=2, loc='upper center', fontsize=10)
     plt.tight_layout()
     fig_el.savefig(fig_ellipse_path, bbox_inches='tight')
     plt.close(fig_el)
@@ -635,7 +672,7 @@ def generate_sora_latex_report(
         fig_c.savefig(fig_el_chi2_path, bbox_inches='tight')
         plt.close(fig_c)
 
-    # 8. Montagem da Tabela 3 (Observational circumstances)
+    # 8. Montagem da Tabela 3 (Observational circumstances — agora incluindo Cycle Time!)
     table3_rows = []
     for extra in extra_observers:
         table3_rows.append({
@@ -647,6 +684,7 @@ def generate_sora_latex_report(
             'aperture': _latex_escape(extra.get('aperture', '---')),
             'detector': _latex_escape(extra.get('detector', '---')),
             'exptime': _latex_escape(extra.get('exptime', '---')),
+            'cycletime': _latex_escape(extra.get('cycletime', '---')),
             'status': _latex_escape(extra.get('status', '---')),
             'filter': _latex_escape(extra.get('filter', 'Clear')),
         })
@@ -663,6 +701,9 @@ def generate_sora_latex_report(
         exptime_val = getattr(lc, 'exptime', None)
         exptime_str = f"{_to_float(exptime_val):.3f}" if exptime_val is not None else "---"
 
+        cycle_val = getattr(lc, 'cycle', None)
+        cycle_str = f"{_to_float(cycle_val):.4f}" if cycle_val is not None and not np.isnan(_to_float(cycle_val)) else "---"
+
         st_cap = chord.status().capitalize()
         table3_rows.append({
             'site': _latex_escape(meta.get('site_name', obs.name)),
@@ -673,6 +714,7 @@ def generate_sora_latex_report(
             'aperture': _latex_escape(meta.get('aperture', '---')),
             'detector': _latex_escape(meta.get('detector', '---')),
             'exptime': meta.get('exptime', exptime_str),
+            'cycletime': meta.get('cycletime', cycle_str),
             'status': _latex_escape(meta.get('status', st_cap)),
             'filter': _latex_escape(meta.get('filter', 'Clear')),
         })
@@ -725,7 +767,18 @@ def generate_sora_latex_report(
     # 11. Extração da Posição Astrométrica Refinada (new_astrometric_position)
     astrom_data = _extract_astrometric_results(occ, occ_full_text)
 
-    # 12. Construção do código LaTeX (.tex)
+    # 12. Formatação dos links para Lucky Star e Occultation Portal
+    if lucky_star_url:
+        ls_latex = f"ERC \\href{{{lucky_star_url}}}{{*Lucky Star*}} project [3] (\\url{{{lucky_star_url}}})"
+    else:
+        ls_latex = "ERC *Lucky Star* project [3]"
+
+    if occultation_portal_url:
+        op_latex = f"\\href{{{occultation_portal_url}}}{{*Occultation Portal*}} website [4] (\\url{{{occultation_portal_url}}})"
+    else:
+        op_latex = "*Occultation Portal* website [4]"
+
+    # 13. Construção do código LaTeX (.tex)
     prelim_str = r"\\ \textbf{PRELIMINARY}" if preliminary else ""
     tex_lines = []
     tex_lines.append(r"% =============================================================================")
@@ -741,6 +794,7 @@ def generate_sora_latex_report(
     tex_lines.append(r"\usepackage{listings}")
     tex_lines.append(r"\usepackage{float}")
     tex_lines.append(r"\usepackage{caption}")
+    tex_lines.append(r"\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}")
     tex_lines.append(r"")
     tex_lines.append(r"% Configuração do ambiente listings para o output textual do SORA (Listing 1)")
     tex_lines.append(r"\lstset{")
@@ -776,8 +830,8 @@ def generate_sora_latex_report(
         f"The stellar occultation by the {_latex_escape(body_class)} asteroid {_latex_escape(body_prose_name)} "
         f"presented in this report was predicted using the star positions from the Gaia Data Release 3 (Gaia DR3) "
         f"catalogue [1] together with the Numerical Integration of the Motion of an Asteroid (NIMA) ephemeris [2]. "
-        f"The prediction was made available through the ERC *Lucky Star* project [3], and the observational campaign "
-        f"was coordinated using the *Occultation Portal* website [4]."
+        f"The prediction was made available through the {ls_latex}, and the observational campaign "
+        f"was coordinated using the {op_latex}."
     )
     tex_lines.append(r"")
     if n_neg > 0:
@@ -843,6 +897,10 @@ def generate_sora_latex_report(
     tex_lines.append(f"        Position angle & ${pa_val:.2f}^\\circ$ \\\\")
     tex_lines.append(f"        Positive chords & {n_pos} \\\\")
     tex_lines.append(f"        Negative chords & {n_neg} \\\\")
+    if lucky_star_url:
+        tex_lines.append(f"        Lucky Star URL & \\url{{{lucky_star_url}}} \\\\")
+    if occultation_portal_url:
+        tex_lines.append(f"        Occultation Portal URL & \\url{{{occultation_portal_url}}} \\\\")
     tex_lines.append(r"        \hline")
     tex_lines.append(r"    \end{tabular}")
     tex_lines.append(r"    \label{tab:circumstances}")
@@ -850,7 +908,7 @@ def generate_sora_latex_report(
     tex_lines.append(r"")
     tex_lines.append(r"\clearpage")
     tex_lines.append(r"")
-    tex_lines.append(r"% --- Tabela 3: Circunstâncias Observacionais ---")
+    tex_lines.append(r"% --- Tabela 3: Circunstâncias Observacionais (incluindo Exposure Time e Cycle Time) ---")
     tex_lines.append(r"\begin{table}[H]")
     tex_lines.append(r"    \centering")
     tex_lines.append(r"    \caption{Observational circumstances.}")
@@ -858,13 +916,13 @@ def generate_sora_latex_report(
     tex_lines.append(r"    \footnotesize")
     tex_lines.append(r"    \begin{tabular}{cccccc}")
     tex_lines.append(r"        \hline\hline")
-    tex_lines.append(r"         & \textbf{Longitude [$^\circ\,'\,'']$} & & \textbf{Aperture (mm)} & \textbf{Exp. Time} & \textbf{Status} \\")
-    tex_lines.append(r"        \textbf{Site} & \textbf{Latitude [$^\circ\,'\,'']$} & \textbf{Observers} & \textbf{Detector} & \textbf{(s)} & \textbf{Filter} \\")
+    tex_lines.append(r"         & \textbf{Longitude [$^\circ\,'\,'']$} & & \textbf{Aperture (mm)} & \textbf{Exp. Time (s)} & \textbf{Status} \\")
+    tex_lines.append(r"        \textbf{Site} & \textbf{Latitude [$^\circ\,'\,'']$} & \textbf{Observers} & \textbf{Detector} & \textbf{Cycle Time (s)} & \textbf{Filter} \\")
     tex_lines.append(r"         & \textbf{Altitude (m)} & & & & \\")
     tex_lines.append(r"        \hline")
     for idx, r in enumerate(table3_rows):
         tex_lines.append(f"        {r['site']} & {r['lon']} & {r['observers']} & {r['detector']} & {r['exptime']} & {r['status']} \\\\")
-        tex_lines.append(f"         & {r['lat']} & & {r['aperture']} & & {r['filter']} \\\\")
+        tex_lines.append(f"         & {r['lat']} & & {r['aperture']} & {r['cycletime']} & {r['filter']} \\\\")
         tex_lines.append(f"         & {r['alt']} & & & & \\\\")
         tex_lines.append(r"        \hline")
     tex_lines.append(r"    \end{tabular}")
@@ -878,13 +936,13 @@ def generate_sora_latex_report(
     tex_lines.append(r"% =============================================================================")
     tex_lines.append(r"\section{Main body instants determination}")
     tex_lines.append(r"")
-    star_diam_text = f"{star_diam_mas:.4f} mas" if star_diam_mas is not None else "calculated by SORA"
+    star_diam_text = f"{star_diam_mas:.4f} mas ({d_star_km:.2f} km)" if star_diam_mas is not None else f"{d_star_km:.2f} km"
     extra_star_sentence = f" {star_comment}" if star_comment else ""
     tex_lines.append(
         f"The light curves were modeled using the expected limb velocity, calculated from a preliminary ellipse fit. "
         f"The limb-darkened stellar angular diameter was estimated from the surface-brightness relations of "
-        f"Kervella et al. (2004) as {star_diam_text}. At the distance of {_latex_escape(body_prose_name)}, "
-        f"this corresponds to a projected stellar diameter of approximately {d_star_km:.2f} km.{extra_star_sentence}"
+        f"Kervella et al. (2004) as {star_diam_text} at the distance of {_latex_escape(body_prose_name)} "
+        f"({obj_dist_au:.2f} au).{extra_star_sentence}"
     )
     if campaign_comment:
         tex_lines.append(r"")
@@ -911,7 +969,7 @@ def generate_sora_latex_report(
         tex_lines.append(r"    \centering")
         tex_lines.append(f"    \\caption{{Results for instants determination for the {_latex_escape(lc_info['name'])} light curve.}}")
         tex_lines.append(r"    \vspace{0.15cm}")
-        tex_lines.append(r"    \small")
+        tex_lines.append(r"    \footnotesize")
         tex_lines.append(r"    \begin{tabular}{ccccccccc}")
         tex_lines.append(r"        \hline\hline")
         tex_lines.append(r"        Instant & Time (UTC) ($1\sigma$) & $\chi^2_{min}$ & Npts & $\chi^2_{pdf}$ & Dispersion & $\lambda$ ($\mu$m) & $d_{\text{star}}$ & $v_{rad}$ \\")
@@ -1060,7 +1118,7 @@ def generate_sora_latex_report(
     tex_lines.append(r"\begin{figure}[H]")
     tex_lines.append(r"    \centering")
     tex_lines.append(f"    \\includegraphics[width=0.80\\textwidth]{{{fig_ellipse_path}}}")
-    tex_lines.append(r"    \caption{Best fitted ellipse plotted in black with positive and negative chords.}")
+    tex_lines.append(r"    \caption{Best fitted ellipse plotted in black with its fitted center $(f_0, g_0)$ and positive/negative chords.}")
     tex_lines.append(r"    \label{fig:best_ellipse}")
     tex_lines.append(r"\end{figure}")
     tex_lines.append(r"")
